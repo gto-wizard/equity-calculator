@@ -15,11 +15,6 @@ class CMakeBuildExt(build_ext):
         # Get the source directory (where CMakeLists.txt is)
         source_dir = os.path.dirname(os.path.abspath(__file__))
 
-        # Print debugging information
-        print(f"Source directory: {source_dir}")
-        print(f"Build directory: {build_dir}")
-        print(f"Extension path: {self.get_ext_fullpath(ext.name)}")
-
         # Configure CMake
         cmake_args = [
             "cmake",
