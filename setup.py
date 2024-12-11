@@ -64,7 +64,7 @@ class CMakeBuildExt(build_ext):
 
 ext_modules = [
     Extension(
-        name="eqcalc",
+        name="eqcalc._core",
         sources=["src/eqcalc.cc"],
         include_dirs=["src"],
         language="c++"

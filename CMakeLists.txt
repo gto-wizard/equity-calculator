@@ -38,7 +38,8 @@ add_subdirectory(pybind11 EXCLUDE_FROM_ALL SYSTEM)
 add_compile_options(-Wall -Wextra -Wnon-virtual-dtor -pedantic-errors)
 
 # Python bindings
-pybind11_add_module(eqcalc src/eqcalc.cc)
+pybind11_add_module(_core src/eqcalc.cc)
+set_target_properties(_core PROPERTIES OUTPUT_NAME "eqcalc._core")
 
 # Update timestamp when successfully configured
 message(STATUS "Updating .timestamp")
