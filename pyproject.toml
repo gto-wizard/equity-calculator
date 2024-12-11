@@ -1,0 +1,11 @@
+[build-system]
+requires = ["setuptools", "wheel", "cmake", "pybind11"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eqcalc"
+version = "0.1.0"
+description = "Hand Equity Calculator for Texas Hold'em poker"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = []

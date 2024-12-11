@@ -1,0 +1,7 @@
+include CMakeLists.txt
+include src/*.cc
+include src/*.h
+include src/*.hpp
+include README.md
+include pyproject.toml
+recursive-include pybind11 *

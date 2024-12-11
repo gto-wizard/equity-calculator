@@ -1,3 +1,6 @@
 .vscode/
 build/
 *.so
+dist/
+eqcalc.egg-info/
+.pdm-python
