@@ -179,7 +179,7 @@ std::vector<double> exact_equity_from_string(const std::vector<std::string_view>
 
 }  // namespace gtow
 
-PYBIND11_MODULE(eqcalc, m) {
+PYBIND11_MODULE(_core, m) {
   m.doc() = "Hand equity calculator for Texas Hold'em poker";
 
   m.def("cards_from_string", &gtow::cards_from_string, py::arg("cards"),
