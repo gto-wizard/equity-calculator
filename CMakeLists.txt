@@ -35,9 +35,9 @@ execute_process(COMMAND git submodule update --init --recursive)
 add_subdirectory(pybind11 EXCLUDE_FROM_ALL SYSTEM)
 
 # Add compiler warning flags
-if(CMAKE_COMPILER_IS_GNUCXX)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     add_compile_options(-Wall -Wextra -Wnon-virtual-dtor -pedantic-errors)
-endif(CMAKE_COMPILER_IS_GNUCXX)
+endif()
 
 # Python bindings
 pybind11_add_module(_core src/eqcalc.cc)
