@@ -159,41 +159,86 @@ detail::strength_t omaha_strength(const std::vector<card_t>& hand_cards,
   return best;
 }
 
-/// @brief Enumerates every completion of the board.
-/// @details The `PokerHand` is built one card at a time on the way down, so a
-/// leaf never rebuilds it. Omaha also needs the cards as an array, to pick
-/// three of the five; that array is mutated in place, so it allocates nothing.
-/// Hold'em never reads it, and `IsOmaha` keeps those writes out of its loop.
-template <int N, bool IsOmaha, class F>
-void enumerate_all_boards(const std::vector<card_t>& deck, F& f, BoardCards& board,
-                          const PokerHand& board_hand, std::size_t depth,
-                          std::size_t index = 0) {
+/// @brief Enumerates every completion of the board, for Hold'em.
+/// @details The hand is carried by value, which is two 64-bit words, and it is
+/// merged one card at a time on the way down, so a leaf never rebuilds it.
+/// This is the enumeration the Hold'em path has always used.
+template <int N, class F>
+void enumerate_holdem_boards(const std::vector<card_t>& deck, F f, PokerHand board = {},
+                             unsigned index = 0) {
   if constexpr (N == 0) {
-    f(board, board_hand);
+    f(board);
   } else {
     for (; index < deck.size(); ++index) {
-      if constexpr (IsOmaha) {
-        board[depth] = deck[index];
-      }
-      enumerate_all_boards<N - 1, IsOmaha>(deck, f, board, board_hand + PokerHand{deck[index]},
-                                           depth + 1, index + 1);
+      enumerate_holdem_boards<N - 1>(deck, f, board + PokerHand{deck[index]}, index + 1);
     }
   }
 }
 
-/// @brief Finds the winners of one runout and adds its weight to the counters.
-/// @param strength_of Returns the strength of hand `i` on this runout.
-template <class F>
-void score_runout(std::size_t n, F strength_of, std::vector<std::uint64_t>& win_counts,
-                  std::vector<std::uint64_t>& tie_counts,
-                  std::vector<std::uint64_t>& equity_counts,
-                  std::vector<unsigned>& winner_buffer, std::uint64_t fact) {
-  auto max_strength = strength_of(0);
+/// @brief Enumerates every completion of the board, for Omaha.
+/// @details Omaha also needs the board as an array, because it picks three of
+/// the five cards. Each level writes its own slot before it recurses, so the
+/// array holds the current board at every leaf and the recursion allocates
+/// nothing.
+template <int N, class F>
+void enumerate_omaha_boards(const std::vector<card_t>& deck, F f, BoardCards& board,
+                            PokerHand board_hand, std::size_t depth, unsigned index = 0) {
+  if constexpr (N == 0) {
+    f(board, board_hand);
+  } else {
+    for (; index < deck.size(); ++index) {
+      board[depth] = deck[index];
+      enumerate_omaha_boards<N - 1>(deck, f, board, board_hand + PokerHand{deck[index]}, depth + 1,
+                                    index + 1);
+    }
+  }
+}
+
+/// @brief Adds one runout to the counters.
+/// @details `winner_buffer` holds the `num_winners` winners of the runout. A
+/// chop adds the FULL weight to `tie_counts` and the share `1 / num_winners`
+/// to `chop_equity`, which is what `EquityResult` documents.
+/// @note A sole winner writes ONE counter, not two. Almost every runout has a
+/// sole winner and a Hold'em preflop call visits 1.7 million runouts, so a
+/// second store costs about 6 % of the call: 9.2 ms against 8.7 ms on one
+/// runner. The equity of a hand is `win_counts + chop_equity`, so the second
+/// counter carries nothing the first two do not.
+inline void add_runout(const std::vector<unsigned>& winner_buffer, unsigned num_winners,
+                       std::vector<std::uint64_t>& win_counts,
+                       std::vector<std::uint64_t>& tie_counts,
+                       std::vector<std::uint64_t>& chop_equity, std::uint64_t fact) {
+  if (num_winners == 1) {
+    win_counts[winner_buffer[0]] += fact;
+  } else {
+    const auto addend = fact / num_winners;
+    for (unsigned i = 0; i < num_winners; ++i) {
+      tie_counts[winner_buffer[i]] += fact;
+      chop_equity[winner_buffer[i]] += addend;
+    }
+  }
+}
+
+/// @brief Scores one Hold'em runout.
+/// @details Hold'em plays the best five of the seven cards, which the
+/// evaluator does on the merged hand.
+/// @note The winner loop is written out once per variant rather than taking
+/// the strength as a callable. GCC 12 does not inline a callable into this
+/// leaf, so each hand of each runout pays a function call: 10.9 ms against
+/// 9.2 ms on one runner, about 20 %. Production already serves this path, so
+/// it keeps the shape the Hold'em-only revision was measured in.
+inline void update_holdem_stats(const std::vector<PokerHand>& hands, const PokerHand& board,
+                                std::vector<std::uint64_t>& win_counts,
+                                std::vector<std::uint64_t>& tie_counts,
+                                std::vector<std::uint64_t>& chop_equity,
+                                std::vector<unsigned>& winner_buffer, std::uint64_t fact) {
+  const auto n = hands.size();
+
+  auto max_strength = (hands[0] + board).evaluate();
   unsigned num_winners = 1;
   winner_buffer[0] = 0;
 
   for (unsigned i = 1; i < n; ++i) {
-    const auto strength = strength_of(i);
+    const auto strength = (hands[i] + board).evaluate();
     if (strength > max_strength) {
       max_strength = strength;
       num_winners = 1;
@@ -203,79 +248,95 @@ void score_runout(std::size_t n, F strength_of, std::vector<std::uint64_t>& win_
     }
   }
 
-  if (num_winners == 1) {
-    win_counts[winner_buffer[0]] += fact;
-    equity_counts[winner_buffer[0]] += fact;
-  } else {
-    const auto addend = fact / num_winners;
-    for (unsigned i = 0; i < num_winners; ++i) {
-      tie_counts[winner_buffer[i]] += fact;
-      equity_counts[winner_buffer[i]] += addend;
+  add_runout(winner_buffer, num_winners, win_counts, tie_counts, chop_equity, fact);
+}
+
+/// @brief Scores one Omaha runout.
+/// @details The board fragments are built once per runout and shared by every
+/// hand at that runout. See `update_holdem_stats` for why the loop is written
+/// out rather than shared.
+inline void update_omaha_stats(const std::vector<std::vector<card_t>>& hands_cards,
+                               const BoardTriples& board_triples,
+                               std::vector<std::uint64_t>& win_counts,
+                               std::vector<std::uint64_t>& tie_counts,
+                               std::vector<std::uint64_t>& chop_equity,
+                               std::vector<unsigned>& winner_buffer, std::uint64_t fact) {
+  const auto n = hands_cards.size();
+
+  auto max_strength = omaha_strength(hands_cards[0], board_triples);
+  unsigned num_winners = 1;
+  winner_buffer[0] = 0;
+
+  for (unsigned i = 1; i < n; ++i) {
+    const auto strength = omaha_strength(hands_cards[i], board_triples);
+    if (strength > max_strength) {
+      max_strength = strength;
+      num_winners = 1;
+      winner_buffer[0] = i;
+    } else if (strength == max_strength) {
+      winner_buffer[num_winners++] = i;
     }
   }
+
+  add_runout(winner_buffer, num_winners, win_counts, tie_counts, chop_equity, fact);
 }
 
-/// @brief Scores one runout for one variant.
-/// @details The variant is a template parameter, not a run-time flag, so the
-/// Hold'em path never builds the board fragments that only Omaha reads. A
-/// Hold'em preflop call visits 1.7 million runouts, and the fragments are
-/// 160 bytes each.
-template <bool IsOmaha>
-void update_stats(const std::vector<std::vector<card_t>>& hands_cards,
-                  const std::vector<PokerHand>& hands, const BoardCards& board,
-                  const PokerHand& board_hand, std::vector<std::uint64_t>& win_counts,
-                  std::vector<std::uint64_t>& tie_counts,
-                  std::vector<std::uint64_t>& equity_counts, std::vector<unsigned>& winner_buffer,
-                  std::uint64_t fact) {
-  const auto n = hands.size();
-
-  if constexpr (IsOmaha) {
-    const BoardTriples board_triples = board_triples_of(board_hand, board);
-    score_runout(
-        n, [&](std::size_t i) { return omaha_strength(hands_cards[i], board_triples); },
-        win_counts, tie_counts, equity_counts, winner_buffer, fact);
-  } else {
-    // Hold'em plays the best five of the seven cards, which the evaluator
-    // does on the merged hand.
-    score_runout(
-        n, [&](std::size_t i) { return (board_hand + hands[i]).evaluate(); }, win_counts,
-        tie_counts, equity_counts, winner_buffer, fact);
-  }
-}
-
-/// @brief Runs the enumeration for one variant and one board size.
-/// @details The variant is fixed here rather than at the leaf. A branch at the
-/// leaf runs once per runout, up to 1.7 million times for a Hold'em preflop
-/// call, and it stops the compiler inlining the scorer into the recursion.
-template <bool IsOmaha>
-void enumerate_and_score(const std::vector<card_t>& deck,
-                         const std::vector<std::vector<card_t>>& hands_cards,
-                         const std::vector<PokerHand>& hands, BoardCards& running_board,
-                         const PokerHand& board, std::vector<std::uint64_t>& win_counts,
-                         std::vector<std::uint64_t>& tie_counts,
-                         std::vector<std::uint64_t>& equity_counts,
-                         std::vector<unsigned>& winner_buffer, std::uint64_t fact) {
-  auto score = [&](const BoardCards& river_board, const PokerHand& river_hand) {
-    update_stats<IsOmaha>(hands_cards, hands, river_board, river_hand, win_counts, tie_counts,
-                          equity_counts, winner_buffer, fact);
+/// @brief Runs the Hold'em enumeration over every board size.
+void enumerate_and_score_holdem(const std::vector<card_t>& deck,
+                                const std::vector<PokerHand>& hands, const PokerHand& board,
+                                std::vector<std::uint64_t>& win_counts,
+                                std::vector<std::uint64_t>& tie_counts,
+                                std::vector<std::uint64_t>& chop_equity,
+                                std::vector<unsigned>& winner_buffer, std::uint64_t fact) {
+  const auto score = [&](const PokerHand& river_board) {
+    update_holdem_stats(hands, river_board, win_counts, tie_counts, chop_equity, winner_buffer,
+                        fact);
   };
 
   switch (board.size()) {
     case 0:
-      enumerate_all_boards<5, IsOmaha>(deck, score, running_board, board, 0);
+      enumerate_holdem_boards<5>(deck, score);
       break;
     case 3:
-      enumerate_all_boards<2, IsOmaha>(deck, score, running_board, board, 3);
+      enumerate_holdem_boards<2>(deck, score, board);
       break;
     case 4:
-      enumerate_all_boards<1, IsOmaha>(deck, score, running_board, board, 4);
-      break;
-    case 5:
-      score(running_board, board);
+      enumerate_holdem_boards<1>(deck, score, board);
       break;
     default:
-      // `validate_inputs` has already rejected every other size.
-      throw std::invalid_argument("exact_equity: The board size must be 0, 3, 4, or 5");
+      // `validate_inputs` leaves only a complete board here.
+      score(board);
+      break;
+  }
+}
+
+/// @brief Runs the Omaha enumeration over every board size.
+void enumerate_and_score_omaha(const std::vector<card_t>& deck,
+                               const std::vector<std::vector<card_t>>& hands_cards,
+                               BoardCards& running_board, const PokerHand& board,
+                               std::vector<std::uint64_t>& win_counts,
+                               std::vector<std::uint64_t>& tie_counts,
+                               std::vector<std::uint64_t>& chop_equity,
+                               std::vector<unsigned>& winner_buffer, std::uint64_t fact) {
+  const auto score = [&](const BoardCards& river_board, const PokerHand& river_hand) {
+    update_omaha_stats(hands_cards, board_triples_of(river_hand, river_board), win_counts,
+                       tie_counts, chop_equity, winner_buffer, fact);
+  };
+
+  switch (board.size()) {
+    case 0:
+      enumerate_omaha_boards<5>(deck, score, running_board, board, 0);
+      break;
+    case 3:
+      enumerate_omaha_boards<2>(deck, score, running_board, board, 3);
+      break;
+    case 4:
+      enumerate_omaha_boards<1>(deck, score, running_board, board, 4);
+      break;
+    default:
+      // `validate_inputs` leaves only a complete board here.
+      score(running_board, board);
+      break;
   }
 }
 
@@ -348,7 +409,7 @@ std::vector<EquityResult> exact_equity_detailed(const std::vector<std::vector<ca
   const auto fact = factorial(static_cast<int>(n));
   std::vector<std::uint64_t> win_counts(n);
   std::vector<std::uint64_t> tie_counts(n);
-  std::vector<std::uint64_t> equity_counts(n);
+  std::vector<std::uint64_t> chop_equity(n);
   std::vector<unsigned> winner_buffer(n);
 
   BoardCards running_board{};
@@ -356,11 +417,11 @@ std::vector<EquityResult> exact_equity_detailed(const std::vector<std::vector<ca
 
   // Every hand holds the same number of cards, so one variant runs per call.
   if (hands_cards.front().size() == HOLDEM_HAND_SIZE) {
-    enumerate_and_score<false>(deck, hands_cards, hands, running_board, board, win_counts,
-                               tie_counts, equity_counts, winner_buffer, fact);
+    enumerate_and_score_holdem(deck, hands, board, win_counts, tie_counts, chop_equity,
+                               winner_buffer, fact);
   } else {
-    enumerate_and_score<true>(deck, hands_cards, hands, running_board, board, win_counts,
-                              tie_counts, equity_counts, winner_buffer, fact);
+    enumerate_and_score_omaha(deck, hands_cards, running_board, board, win_counts, tie_counts,
+                              chop_equity, winner_buffer, fact);
   }
 
   const auto comb =
@@ -372,7 +433,7 @@ std::vector<EquityResult> exact_equity_detailed(const std::vector<std::vector<ca
   for (std::size_t i = 0; i < n; ++i) {
     result.push_back({static_cast<double>(win_counts[i]) / denom,
                       static_cast<double>(tie_counts[i]) / denom,
-                      static_cast<double>(equity_counts[i]) / denom});
+                      static_cast<double>(win_counts[i] + chop_equity[i]) / denom});
   }
 
   return result;
