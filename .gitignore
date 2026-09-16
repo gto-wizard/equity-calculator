@@ -4,3 +4,5 @@ build/
 dist/
 eqcalc.egg-info/
 .pdm-python
+__pycache__/
+.pytest_cache/

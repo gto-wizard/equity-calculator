@@ -1,0 +1,56 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: build and test
+    runs-on: ubuntu-latest
+    # The Django production image builds this extension on the same base, so
+    # the compiler is the one production uses (GCC 12 from bookworm).
+    container: python:3.12-slim-bookworm
+    timeout-minutes: 20
+    steps:
+      # Git must exist before the checkout, or the action falls back to a
+      # tarball download and fetches no submodules.
+      - name: Install the build tools
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends build-essential git
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Trust the workspace
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Report the compiler
+        run: c++ --version
+
+      # Bookworm ships CMake 3.25 and CMakeLists.txt asks for 3.28, so take
+      # CMake from PyPI rather than from apt.
+      - name: Install CMake and pytest
+        run: pip install --no-cache-dir cmake pytest
+
+      - name: Build the extension
+        run: pip install --no-cache-dir -e .
+
+      - name: Run the tests
+        run: pytest test/ -v
+
+      # One build serves both. The table gates nothing; it tells a caller
+      # which spots it can afford to answer synchronously.
+      - name: Measure
+        run: python benchmark.py >> "$GITHUB_STEP_SUMMARY"

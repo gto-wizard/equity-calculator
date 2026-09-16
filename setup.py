@@ -60,7 +60,11 @@ class CMakeBuildExt(build_ext):
                     f"Directory contents: {os.listdir(build_dir)}"
                 )
 
-        self.copy_file(so_file, self.get_ext_fullpath(ext.name))
+        # An editable install does not copy the package first, so the
+        # destination directory can be absent. `copy_file` does not create it.
+        dest = self.get_ext_fullpath(ext.name)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        self.copy_file(so_file, dest)
 
 ext_modules = [
     Extension(
