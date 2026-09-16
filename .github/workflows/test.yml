@@ -11,7 +11,8 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A push to main must keep its record. Only a branch cancels its older run.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test:
@@ -41,8 +42,10 @@ jobs:
 
       # Bookworm ships CMake 3.25 and CMakeLists.txt asks for 3.28, so take
       # CMake from PyPI rather than from apt.
+      # Pinned, because this is the only job in the repository. An unpinned
+      # release of either turns it red with no change here.
       - name: Install CMake and pytest
-        run: pip install --no-cache-dir cmake pytest
+        run: pip install --no-cache-dir "cmake==4.1.*" "pytest==8.4.*"
 
       - name: Build the extension
         run: pip install --no-cache-dir -e .
@@ -54,4 +57,9 @@ jobs:
       # which spots it can afford to answer synchronously. It goes to the log
       # as well as the summary, so a reviewer can read it from the run.
       - name: Measure
-        run: python benchmark.py | tee -a "$GITHUB_STEP_SUMMARY"
+        # `bash -e` does not set pipefail, so without this the step would
+        # report the exit code of `tee` and a crash in the benchmark would
+        # leave the job green with the table silently missing.
+        run: |
+          set -o pipefail
+          python benchmark.py | tee -a "$GITHUB_STEP_SUMMARY"

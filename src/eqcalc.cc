@@ -43,7 +43,7 @@ inline constexpr std::size_t MAX_OMAHA_PLAYERS = 6;
 /// The largest number of hands any enumeration accepts.
 /// @details Each runout adds a weight of `factorial(n)` to a `std::uint64_t`
 /// accumulator, and the total is `factorial(n)` times the board count. That
-/// product overflows below 18 hands, which would report wrong equities rather
+/// product overflows at 18 hands, which would report wrong equities rather
 /// than fail. Twelve is above every real table, so no caller loses a spot it
 /// can play.
 inline constexpr std::size_t MAX_PLAYERS = 12;
@@ -91,11 +91,28 @@ constexpr bool is_valid_board_size(std::size_t size) noexcept {
 /// `i < size() - 1`, which wraps to `SIZE_MAX` on an empty hand and reads
 /// past the end of the vector. That is undefined behaviour, and it ends the
 /// process rather than the one call.
+/// @brief Rejects a card value `PokerHand` cannot hold.
+/// @details `PokerHand` reads its lookup table with `at`, which reports an
+/// out-of-range card as a different exception type. Reject it here so every
+/// bad input raises the same one, in the hands, the board and the dead cards
+/// alike.
+void validate_card_values(const std::vector<card_t>& cards) {
+  for (const auto card : cards) {
+    if (card >= detail::NUM_CARDS) [[unlikely]] {
+      throw std::invalid_argument("exact_equity: A card must be in the range 0 to 51");
+    }
+  }
+}
+
 void validate_inputs(const std::vector<std::vector<card_t>>& hands_cards,
-                     std::size_t board_size) {
-  if (!is_valid_board_size(board_size)) [[unlikely]] {
+                     const std::vector<card_t>& board_cards,
+                     const std::vector<card_t>& dead_cards) {
+  if (!is_valid_board_size(board_cards.size())) [[unlikely]] {
     throw std::invalid_argument("exact_equity: The board size must be 0, 3, 4, or 5");
   }
+
+  validate_card_values(board_cards);
+  validate_card_values(dead_cards);
 
   const auto hand_size = hands_cards.front().size();
   if (!is_valid_hand_size(hand_size)) [[unlikely]] {
@@ -106,14 +123,7 @@ void validate_inputs(const std::vector<std::vector<card_t>>& hands_cards,
     if (hand.size() != hand_size) [[unlikely]] {
       throw std::invalid_argument("exact_equity: Every hand must contain the same number of cards");
     }
-    for (const auto card : hand) {
-      // `PokerHand` reads its lookup table with `at`, which reports an
-      // out-of-range card as a different exception type. Reject it here so
-      // every bad input raises the same one.
-      if (card >= detail::NUM_CARDS) [[unlikely]] {
-        throw std::invalid_argument("exact_equity: A card must be in the range 0 to 51");
-      }
-    }
+    validate_card_values(hand);
   }
 
   if (hands_cards.size() > MAX_PLAYERS) [[unlikely]] {
@@ -370,27 +380,30 @@ std::vector<EquityResult> exact_equity_detailed(const std::vector<std::vector<ca
     return {};
   }
 
-  validate_inputs(hands_cards, board_cards.size());
+  validate_inputs(hands_cards, board_cards, dead_cards);
 
-  // Building the hands rejects a card that repeats inside one hand, so it
-  // must happen before the single-hand answer.
   std::vector<PokerHand> hands;
   hands.reserve(n);
   for (const auto& hand : hands_cards) {
     hands.emplace_back(hand);
   }
 
-  if (n == 1) {
-    return std::vector<EquityResult>(1, {1.0, 0.0, 1.0});
-  }
-
   const PokerHand board(board_cards);
 
+  // Merging rejects a card that repeats anywhere: inside one hand, between
+  // two hands, or between a hand and the board or the dead cards. A single
+  // hand takes the pot whatever the board is, but it must pass the same
+  // checks first, or the rule the README states would hold for two hands and
+  // not for one.
   PokerHand combined = board;
   for (const auto& hand : hands) {
     combined += hand;
   }
   combined += PokerHand(dead_cards);
+
+  if (n == 1) {
+    return std::vector<EquityResult>(1, {1.0, 0.0, 1.0});
+  }
 
   std::vector<card_t> deck;
   deck.reserve(detail::NUM_CARDS - combined.size());

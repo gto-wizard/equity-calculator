@@ -21,6 +21,8 @@ WHEEL_HIGH = RANKS.index("5")
 
 FULL_BOARD_SIZE = 5
 HOLDEM_HAND_SIZE = 2
+#: How many cards in a row make a straight.
+STRAIGHT_LENGTH = 5
 OMAHA_HOLE_CARDS_USED = 2
 OMAHA_BOARD_CARDS_USED = 3
 
@@ -45,7 +47,7 @@ def rank_five(cards: tuple[tuple[int, int], ...]) -> tuple[int, ...]:
 
     distinct = sorted(set(ranks), reverse=True)
     straight_high = None
-    if len(distinct) == FULL_BOARD_SIZE:
+    if len(distinct) == STRAIGHT_LENGTH:
         if distinct[0] - distinct[4] == 4:
             straight_high = distinct[0]
         elif distinct == [RANKS.index("A"), 3, 2, 1, 0]:

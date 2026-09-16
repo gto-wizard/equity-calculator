@@ -112,6 +112,27 @@ def test_too_few_cards_left_to_complete_the_board_is_rejected():
         eqcalc.exact_equity_detailed_from_string(hands=hands, board="", dead_cards=dead_cards)
 
 
+def test_card_value_out_of_range_in_the_board_is_rejected():
+    """The board goes through the same guard as a hand, not through `at`."""
+    with pytest.raises(ValueError, match="range 0 to 51"):
+        eqcalc.exact_equity_detailed(hands=[[0, 1], [2, 3]], board=[60, 61, 62])
+
+
+def test_card_value_out_of_range_in_the_dead_cards_is_rejected():
+    with pytest.raises(ValueError, match="range 0 to 51"):
+        eqcalc.exact_equity_detailed(hands=[[0, 1], [2, 3]], dead_cards=[60])
+
+
+def test_one_hand_is_checked_against_the_board():
+    """A lone hand still cannot hold a card the board holds.
+
+    It wins whatever the board is, so the guard is the only thing that can
+    report the mistake. Two hands already raise here.
+    """
+    with pytest.raises(ValueError, match="same card"):
+        eqcalc.exact_equity_detailed_from_string(hands=["AhKs"], board="AhKs2c")
+
+
 def test_single_hand_returns_certainty():
     result = eqcalc.exact_equity_detailed_from_string(hands=["AhKs"], board="")
     assert len(result) == 1

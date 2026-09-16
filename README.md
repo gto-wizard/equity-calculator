@@ -21,10 +21,16 @@ that is the image the Django service builds the extension in.
 ## Test
 
 ```bash
+rm -f eqcalc/*.so   # a build for another interpreter would shadow this one
 pip install -e .
 pip install pytest
 pytest test/
 ```
+
+The built extension carries the interpreter version and the platform in its
+name, so a file left by an earlier build does not get replaced. `pytest` then
+imports the old one and reports failures the source does not have. `make`
+clears them; a bare `pip install -e .` does not.
 
 ## Functions
 

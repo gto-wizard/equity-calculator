@@ -26,10 +26,14 @@ build/.timestamp: CMakeLists.txt
 configure:
 	cmake --preset $(CONFIGURE_PRESET) --fresh
 
+# The extension file carries the interpreter and the platform in its name, so
+# a build for one interpreter leaves the file for another in place and `pytest`
+# can import the stale one. Clear them before every build.
 compile: build/.timestamp
+	rm -f eqcalc*.so eqcalc/*.so
 	cmake --build build
 
 # test: compile
 
 clean:
-	rm -rf build eqcalc*.so
+	rm -rf build eqcalc*.so eqcalc/*.so
