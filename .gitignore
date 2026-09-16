@@ -6,3 +6,4 @@ eqcalc.egg-info/
 .pdm-python
 __pycache__/
 .pytest_cache/
+benchmark.md

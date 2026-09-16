@@ -57,9 +57,11 @@ jobs:
       # which spots it can afford to answer synchronously. It goes to the log
       # as well as the summary, so a reviewer can read it from the run.
       - name: Measure
-        # `bash -e` does not set pipefail, so without this the step would
-        # report the exit code of `tee` and a crash in the benchmark would
+        # No pipe. A container job without bash on the image runs each step
+        # under `sh -e`, which has no `pipefail`, so a pipe would report the
+        # exit code of the right-hand side and a crash in the benchmark would
         # leave the job green with the table silently missing.
         run: |
-          set -o pipefail
-          python benchmark.py | tee -a "$GITHUB_STEP_SUMMARY"
+          python benchmark.py > benchmark.md
+          cat benchmark.md
+          cat benchmark.md >> "$GITHUB_STEP_SUMMARY"
