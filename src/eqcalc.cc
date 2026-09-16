@@ -159,17 +159,6 @@ detail::strength_t omaha_strength(const std::vector<card_t>& hand_cards,
   return best;
 }
 
-/// Returns the strength one player makes, for either variant.
-detail::strength_t hand_strength(const std::vector<card_t>& hand_cards, const PokerHand& hand,
-                                 const PokerHand& board_hand, const BoardTriples& board_triples) {
-  if (hand_cards.size() == HOLDEM_HAND_SIZE) {
-    // Hold'em plays the best five of the seven cards, which the evaluator
-    // does on the merged hand.
-    return (board_hand + hand).evaluate();
-  }
-  return omaha_strength(hand_cards, board_triples);
-}
-
 /// @brief Enumerates every completion of the board, in place.
 /// @details The board is carried by reference and mutated at `depth`, so the
 /// recursion allocates nothing. A copied `std::vector` here costs roughly one
@@ -187,23 +176,19 @@ void enumerate_all_boards(const std::vector<card_t>& deck, F& f, BoardCards& boa
   }
 }
 
-void update_stats(const std::vector<std::vector<card_t>>& hands_cards,
-                  const std::vector<PokerHand>& hands, const BoardCards& board, bool is_omaha,
-                  std::vector<std::uint64_t>& win_counts, std::vector<std::uint64_t>& tie_counts,
-                  std::vector<std::uint64_t>& equity_counts, std::vector<unsigned>& winner_buffer,
-                  std::uint64_t fact) {
-  const auto n = hands.size();
-  const PokerHand board_hand(board);
-  // Every hand holds the same number of cards, so one variant runs per call.
-  const BoardTriples board_triples =
-      is_omaha ? board_triples_of(board_hand, board) : BoardTriples{};
-
-  auto max_strength = hand_strength(hands_cards[0], hands[0], board_hand, board_triples);
+/// @brief Finds the winners of one runout and adds its weight to the counters.
+/// @param strength_of Returns the strength of hand `i` on this runout.
+template <class F>
+void score_runout(std::size_t n, F strength_of, std::vector<std::uint64_t>& win_counts,
+                  std::vector<std::uint64_t>& tie_counts,
+                  std::vector<std::uint64_t>& equity_counts,
+                  std::vector<unsigned>& winner_buffer, std::uint64_t fact) {
+  auto max_strength = strength_of(0);
   unsigned num_winners = 1;
   winner_buffer[0] = 0;
 
   for (unsigned i = 1; i < n; ++i) {
-    const auto strength = hand_strength(hands_cards[i], hands[i], board_hand, board_triples);
+    const auto strength = strength_of(i);
     if (strength > max_strength) {
       max_strength = strength;
       num_winners = 1;
@@ -222,6 +207,34 @@ void update_stats(const std::vector<std::vector<card_t>>& hands_cards,
       tie_counts[winner_buffer[i]] += fact;
       equity_counts[winner_buffer[i]] += addend;
     }
+  }
+}
+
+/// @brief Scores one runout for one variant.
+/// @details The variant is a template parameter, not a run-time flag, so the
+/// Hold'em path never builds the board fragments that only Omaha reads. A
+/// Hold'em preflop call visits 1.7 million runouts, and the fragments are
+/// 160 bytes each.
+template <bool IsOmaha>
+void update_stats(const std::vector<std::vector<card_t>>& hands_cards,
+                  const std::vector<PokerHand>& hands, const BoardCards& board,
+                  std::vector<std::uint64_t>& win_counts, std::vector<std::uint64_t>& tie_counts,
+                  std::vector<std::uint64_t>& equity_counts, std::vector<unsigned>& winner_buffer,
+                  std::uint64_t fact) {
+  const auto n = hands.size();
+  const PokerHand board_hand(board);
+
+  if constexpr (IsOmaha) {
+    const BoardTriples board_triples = board_triples_of(board_hand, board);
+    score_runout(
+        n, [&](std::size_t i) { return omaha_strength(hands_cards[i], board_triples); },
+        win_counts, tie_counts, equity_counts, winner_buffer, fact);
+  } else {
+    // Hold'em plays the best five of the seven cards, which the evaluator
+    // does on the merged hand.
+    score_runout(
+        n, [&](std::size_t i) { return (board_hand + hands[i]).evaluate(); }, win_counts,
+        tie_counts, equity_counts, winner_buffer, fact);
   }
 }
 
@@ -300,10 +313,16 @@ std::vector<EquityResult> exact_equity_detailed(const std::vector<std::vector<ca
   BoardCards running_board{};
   std::ranges::copy(board_cards, running_board.begin());
 
+  // Every hand holds the same number of cards, so one variant runs per call.
   const bool is_omaha = hands_cards.front().size() != HOLDEM_HAND_SIZE;
   auto lambda = [&](const BoardCards& river_board) {
-    update_stats(hands_cards, hands, river_board, is_omaha, win_counts, tie_counts, equity_counts,
-                 winner_buffer, fact);
+    if (is_omaha) {
+      update_stats<true>(hands_cards, hands, river_board, win_counts, tie_counts, equity_counts,
+                         winner_buffer, fact);
+    } else {
+      update_stats<false>(hands_cards, hands, river_board, win_counts, tie_counts, equity_counts,
+                          winner_buffer, fact);
+    }
   };
 
   switch (board.size()) {
