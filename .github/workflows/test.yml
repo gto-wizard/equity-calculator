@@ -51,6 +51,7 @@ jobs:
         run: pytest test/ -v
 
       # One build serves both. The table gates nothing; it tells a caller
-      # which spots it can afford to answer synchronously.
+      # which spots it can afford to answer synchronously. It goes to the log
+      # as well as the summary, so a reviewer can read it from the run.
       - name: Measure
-        run: python benchmark.py >> "$GITHUB_STEP_SUMMARY"
+        run: python benchmark.py | tee -a "$GITHUB_STEP_SUMMARY"
