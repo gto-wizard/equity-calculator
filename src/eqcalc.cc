@@ -160,12 +160,11 @@ detail::strength_t omaha_strength(const std::vector<card_t>& hand_cards,
 }
 
 /// @brief Enumerates every completion of the board.
-/// @details Two views of the same board travel down the recursion, because
-/// each variant reads a different one. The card array is carried by reference
-/// and mutated at `depth`, so it allocates nothing; Omaha needs it to pick
-/// three cards of the five. The `PokerHand` is built one card at a time on the
-/// way down, so a leaf never rebuilds it; Hold'em merges it with a hand.
-template <int N, class F>
+/// @details The `PokerHand` is built one card at a time on the way down, so a
+/// leaf never rebuilds it. Omaha also needs the cards as an array, to pick
+/// three of the five; that array is mutated in place, so it allocates nothing.
+/// Hold'em never reads it, and `IsOmaha` keeps those writes out of its loop.
+template <int N, bool IsOmaha, class F>
 void enumerate_all_boards(const std::vector<card_t>& deck, F& f, BoardCards& board,
                           const PokerHand& board_hand, std::size_t depth,
                           std::size_t index = 0) {
@@ -173,9 +172,11 @@ void enumerate_all_boards(const std::vector<card_t>& deck, F& f, BoardCards& boa
     f(board, board_hand);
   } else {
     for (; index < deck.size(); ++index) {
-      board[depth] = deck[index];
-      enumerate_all_boards<N - 1>(deck, f, board, board_hand + PokerHand{deck[index]}, depth + 1,
-                                  index + 1);
+      if constexpr (IsOmaha) {
+        board[depth] = deck[index];
+      }
+      enumerate_all_boards<N - 1, IsOmaha>(deck, f, board, board_hand + PokerHand{deck[index]},
+                                           depth + 1, index + 1);
     }
   }
 }
@@ -239,6 +240,42 @@ void update_stats(const std::vector<std::vector<card_t>>& hands_cards,
     score_runout(
         n, [&](std::size_t i) { return (board_hand + hands[i]).evaluate(); }, win_counts,
         tie_counts, equity_counts, winner_buffer, fact);
+  }
+}
+
+/// @brief Runs the enumeration for one variant and one board size.
+/// @details The variant is fixed here rather than at the leaf. A branch at the
+/// leaf runs once per runout, up to 1.7 million times for a Hold'em preflop
+/// call, and it stops the compiler inlining the scorer into the recursion.
+template <bool IsOmaha>
+void enumerate_and_score(const std::vector<card_t>& deck,
+                         const std::vector<std::vector<card_t>>& hands_cards,
+                         const std::vector<PokerHand>& hands, BoardCards& running_board,
+                         const PokerHand& board, std::vector<std::uint64_t>& win_counts,
+                         std::vector<std::uint64_t>& tie_counts,
+                         std::vector<std::uint64_t>& equity_counts,
+                         std::vector<unsigned>& winner_buffer, std::uint64_t fact) {
+  auto score = [&](const BoardCards& river_board, const PokerHand& river_hand) {
+    update_stats<IsOmaha>(hands_cards, hands, river_board, river_hand, win_counts, tie_counts,
+                          equity_counts, winner_buffer, fact);
+  };
+
+  switch (board.size()) {
+    case 0:
+      enumerate_all_boards<5, IsOmaha>(deck, score, running_board, board, 0);
+      break;
+    case 3:
+      enumerate_all_boards<2, IsOmaha>(deck, score, running_board, board, 3);
+      break;
+    case 4:
+      enumerate_all_boards<1, IsOmaha>(deck, score, running_board, board, 4);
+      break;
+    case 5:
+      score(running_board, board);
+      break;
+    default:
+      // `validate_inputs` has already rejected every other size.
+      throw std::invalid_argument("exact_equity: The board size must be 0, 3, 4, or 5");
   }
 }
 
@@ -318,33 +355,12 @@ std::vector<EquityResult> exact_equity_detailed(const std::vector<std::vector<ca
   std::ranges::copy(board_cards, running_board.begin());
 
   // Every hand holds the same number of cards, so one variant runs per call.
-  const bool is_omaha = hands_cards.front().size() != HOLDEM_HAND_SIZE;
-  auto lambda = [&](const BoardCards& river_board, const PokerHand& river_hand) {
-    if (is_omaha) {
-      update_stats<true>(hands_cards, hands, river_board, river_hand, win_counts, tie_counts,
-                         equity_counts, winner_buffer, fact);
-    } else {
-      update_stats<false>(hands_cards, hands, river_board, river_hand, win_counts, tie_counts,
-                          equity_counts, winner_buffer, fact);
-    }
-  };
-
-  switch (board.size()) {
-    case 0:
-      enumerate_all_boards<5>(deck, lambda, running_board, board, 0);
-      break;
-    case 3:
-      enumerate_all_boards<2>(deck, lambda, running_board, board, 3);
-      break;
-    case 4:
-      enumerate_all_boards<1>(deck, lambda, running_board, board, 4);
-      break;
-    case 5:
-      lambda(running_board, board);
-      break;
-    default:
-      // `validate_inputs` has already rejected every other size.
-      throw std::invalid_argument("exact_equity: The board size must be 0, 3, 4, or 5");
+  if (hands_cards.front().size() == HOLDEM_HAND_SIZE) {
+    enumerate_and_score<false>(deck, hands_cards, hands, running_board, board, win_counts,
+                               tie_counts, equity_counts, winner_buffer, fact);
+  } else {
+    enumerate_and_score<true>(deck, hands_cards, hands, running_board, board, win_counts,
+                              tie_counts, equity_counts, winner_buffer, fact);
   }
 
   const auto comb =
