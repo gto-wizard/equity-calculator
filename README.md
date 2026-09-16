@@ -61,16 +61,17 @@ Therefore `win + tie` is the probability of not losing, and
   players than a table of six.
 - The board holds 0, 3, 4 or 5 cards.
 - No card can repeat across the hands, the board and the dead cards.
-
 - Every card value is in the range 0 to 51.
 
 An input that breaks a rule raises `ValueError`.
 
 ## Cost
 
-Preflop Omaha is expensive. Run `python benchmark.py` for the numbers on your
-machine. A caller that answers a request synchronously should refuse the
-preflop Omaha spots rather than run them.
+Preflop Omaha is the expensive case, and heads-up is its worst case: more
+players take cards out of the deck faster than they add work per board. Every
+spot from the flop on costs less than a preflop Hold'em call. Run
+`python benchmark.py` for the numbers on your machine, and set any limit from
+those, not from a rule of thumb.
 
 ## Example
 

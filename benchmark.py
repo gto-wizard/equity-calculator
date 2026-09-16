@@ -1,8 +1,10 @@
 """Measures the cost of one exact equity call, per spot.
 
 A caller that answers a request synchronously needs to know which spots it can
-afford. Preflop Omaha is not one of them: the board count and the per-hand work
-both grow, so the call costs hundreds of times a Hold'em preflop call.
+afford. Preflop is the only expensive axis: the board count and the per-hand
+work both grow there, and a preflop Omaha call costs tens of times a preflop
+Hold'em call. Every spot from the flop on is cheaper than preflop Hold'em.
+Read the table rather than assuming a limit.
 
 The table also reports the number of five-card evaluations each spot needs, and
 the rate that implies. A caller can estimate any other spot from the rate:
