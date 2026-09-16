@@ -159,19 +159,23 @@ detail::strength_t omaha_strength(const std::vector<card_t>& hand_cards,
   return best;
 }
 
-/// @brief Enumerates every completion of the board, in place.
-/// @details The board is carried by reference and mutated at `depth`, so the
-/// recursion allocates nothing. A copied `std::vector` here costs roughly one
-/// million malloc/free pairs per preflop call.
+/// @brief Enumerates every completion of the board.
+/// @details Two views of the same board travel down the recursion, because
+/// each variant reads a different one. The card array is carried by reference
+/// and mutated at `depth`, so it allocates nothing; Omaha needs it to pick
+/// three cards of the five. The `PokerHand` is built one card at a time on the
+/// way down, so a leaf never rebuilds it; Hold'em merges it with a hand.
 template <int N, class F>
 void enumerate_all_boards(const std::vector<card_t>& deck, F& f, BoardCards& board,
-                          std::size_t depth, std::size_t index = 0) {
+                          const PokerHand& board_hand, std::size_t depth,
+                          std::size_t index = 0) {
   if constexpr (N == 0) {
-    f(board);
+    f(board, board_hand);
   } else {
     for (; index < deck.size(); ++index) {
       board[depth] = deck[index];
-      enumerate_all_boards<N - 1>(deck, f, board, depth + 1, index + 1);
+      enumerate_all_boards<N - 1>(deck, f, board, board_hand + PokerHand{deck[index]}, depth + 1,
+                                  index + 1);
     }
   }
 }
@@ -218,11 +222,11 @@ void score_runout(std::size_t n, F strength_of, std::vector<std::uint64_t>& win_
 template <bool IsOmaha>
 void update_stats(const std::vector<std::vector<card_t>>& hands_cards,
                   const std::vector<PokerHand>& hands, const BoardCards& board,
-                  std::vector<std::uint64_t>& win_counts, std::vector<std::uint64_t>& tie_counts,
+                  const PokerHand& board_hand, std::vector<std::uint64_t>& win_counts,
+                  std::vector<std::uint64_t>& tie_counts,
                   std::vector<std::uint64_t>& equity_counts, std::vector<unsigned>& winner_buffer,
                   std::uint64_t fact) {
   const auto n = hands.size();
-  const PokerHand board_hand(board);
 
   if constexpr (IsOmaha) {
     const BoardTriples board_triples = board_triples_of(board_hand, board);
@@ -315,28 +319,28 @@ std::vector<EquityResult> exact_equity_detailed(const std::vector<std::vector<ca
 
   // Every hand holds the same number of cards, so one variant runs per call.
   const bool is_omaha = hands_cards.front().size() != HOLDEM_HAND_SIZE;
-  auto lambda = [&](const BoardCards& river_board) {
+  auto lambda = [&](const BoardCards& river_board, const PokerHand& river_hand) {
     if (is_omaha) {
-      update_stats<true>(hands_cards, hands, river_board, win_counts, tie_counts, equity_counts,
-                         winner_buffer, fact);
+      update_stats<true>(hands_cards, hands, river_board, river_hand, win_counts, tie_counts,
+                         equity_counts, winner_buffer, fact);
     } else {
-      update_stats<false>(hands_cards, hands, river_board, win_counts, tie_counts, equity_counts,
-                          winner_buffer, fact);
+      update_stats<false>(hands_cards, hands, river_board, river_hand, win_counts, tie_counts,
+                          equity_counts, winner_buffer, fact);
     }
   };
 
   switch (board.size()) {
     case 0:
-      enumerate_all_boards<5>(deck, lambda, running_board, 0);
+      enumerate_all_boards<5>(deck, lambda, running_board, board, 0);
       break;
     case 3:
-      enumerate_all_boards<2>(deck, lambda, running_board, 3);
+      enumerate_all_boards<2>(deck, lambda, running_board, board, 3);
       break;
     case 4:
-      enumerate_all_boards<1>(deck, lambda, running_board, 4);
+      enumerate_all_boards<1>(deck, lambda, running_board, board, 4);
       break;
     case 5:
-      lambda(running_board);
+      lambda(running_board, board);
       break;
     default:
       // `validate_inputs` has already rejected every other size.
