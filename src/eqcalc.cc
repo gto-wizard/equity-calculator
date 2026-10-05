@@ -7,8 +7,10 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
+#include "holdem_preflop.h"
 #include "poker_hand.h"
 
 namespace py = pybind11;
@@ -26,6 +28,17 @@ struct EquityResult {
   double win;
   double tie;
   double equity;
+};
+
+/// The weighted runout counters of one spot, before the division.
+/// @details `win`, `tie` and `chop_equity` hold one counter per hand, as
+/// `add_runout` fills them. Every runout adds `factorial(n)` in total, so
+/// `total` is `factorial(n)` times the number of runouts.
+struct RunoutCounts {
+  std::vector<std::uint64_t> win;
+  std::vector<std::uint64_t> tie;
+  std::vector<std::uint64_t> chop_equity;
+  std::uint64_t total;
 };
 
 namespace {
@@ -350,37 +363,26 @@ void enumerate_and_score_omaha(const std::vector<card_t>& deck,
   }
 }
 
-}  // namespace
+/// @brief Checks the input and returns every card the spot uses.
+/// @details Merging rejects a card that repeats anywhere: inside one hand,
+/// between two hands, or between a hand and the board or the dead cards.
+PokerHand used_cards_of(const std::vector<std::vector<card_t>>& hands_cards,
+                        const std::vector<card_t>& board_cards,
+                        const std::vector<card_t>& dead_cards) {
+  validate_inputs(hands_cards, board_cards, dead_cards);
 
-std::vector<card_t> cards_from_string(std::string_view cards) {
-  if (cards.size() % 2 != 0) [[unlikely]] {
-    throw std::invalid_argument("cards_from_string: The card string must be of even length");
+  PokerHand used(board_cards);
+  for (const auto& hand : hands_cards) {
+    used += PokerHand(hand);
   }
-
-  std::vector<card_t> result;
-  result.reserve(cards.size() / 2);
-
-  for (unsigned i = 0; i < cards.size(); i += 2) {
-    const auto rank = detail::RANK_CHARS.find(cards[i]);
-    const auto suit = detail::SUIT_CHARS.find(cards[i + 1]);
-    if (rank == std::string_view::npos || suit == std::string_view::npos) [[unlikely]] {
-      throw std::invalid_argument("cards_from_string: The card string contains invalid characters");
-    }
-    result.push_back(detail::make_card(rank, suit));
-  }
-
-  return result;
+  used += PokerHand(dead_cards);
+  return used;
 }
 
-std::vector<EquityResult> exact_equity_detailed(const std::vector<std::vector<card_t>>& hands_cards,
-                                                const std::vector<card_t>& board_cards = {},
-                                                const std::vector<card_t>& dead_cards = {}) {
+/// @brief Enumerates every runout of a checked spot with two or more hands.
+RunoutCounts count_runouts(const std::vector<std::vector<card_t>>& hands_cards,
+                           const std::vector<card_t>& board_cards, const PokerHand& used_cards) {
   const auto n = hands_cards.size();
-  if (n == 0) {
-    return {};
-  }
-
-  validate_inputs(hands_cards, board_cards, dead_cards);
 
   std::vector<PokerHand> hands;
   hands.reserve(n);
@@ -390,25 +392,10 @@ std::vector<EquityResult> exact_equity_detailed(const std::vector<std::vector<ca
 
   const PokerHand board(board_cards);
 
-  // Merging rejects a card that repeats anywhere: inside one hand, between
-  // two hands, or between a hand and the board or the dead cards. A single
-  // hand takes the pot whatever the board is, but it must pass the same
-  // checks first, or the rule the README states would hold for two hands and
-  // not for one.
-  PokerHand combined = board;
-  for (const auto& hand : hands) {
-    combined += hand;
-  }
-  combined += PokerHand(dead_cards);
-
-  if (n == 1) {
-    return std::vector<EquityResult>(1, {1.0, 0.0, 1.0});
-  }
-
   std::vector<card_t> deck;
-  deck.reserve(detail::NUM_CARDS - combined.size());
+  deck.reserve(detail::NUM_CARDS - used_cards.size());
   for (card_t card = 0; card < detail::NUM_CARDS; ++card) {
-    if (!combined.contains(card)) {
+    if (!used_cards.contains(card)) {
       deck.push_back(card);
     }
   }
@@ -439,29 +426,113 @@ std::vector<EquityResult> exact_equity_detailed(const std::vector<std::vector<ca
 
   const auto comb =
       combinations(static_cast<int>(deck.size()), static_cast<int>(cards_to_come));
-  const double denom = static_cast<double>(fact * comb);
+  return {std::move(win_counts), std::move(tie_counts), std::move(chop_equity), fact * comb};
+}
+
+/// @brief Whether the preflop table answers the spot: two Hold'em hands, no
+/// board and no dead cards. A dead card changes the deck, so it is a
+/// different spot.
+bool is_heads_up_holdem_preflop(const std::vector<std::vector<card_t>>& hands_cards,
+                                const std::vector<card_t>& board_cards,
+                                const std::vector<card_t>& dead_cards) {
+  return hands_cards.size() == 2 && hands_cards.front().size() == HOLDEM_HAND_SIZE &&
+         board_cards.empty() && dead_cards.empty();
+}
+
+/// @brief Reads the counters of a heads-up Hold'em preflop spot from the table.
+/// @details These are the counters the enumeration builds: `add_runout` adds
+/// `factorial(2)` for a sole win, and for a chop it adds `factorial(2)` to
+/// both tie counters and half of it to both chop counters.
+RunoutCounts holdem_preflop_counts(const std::vector<std::vector<card_t>>& hands_cards) {
+  const auto& first = hands_cards[0];
+  const auto& second = hands_cards[1];
+  const auto canonical =
+      holdem_preflop::canonical_matchup({first[0], first[1]}, {second[0], second[1]});
+  const auto& row = holdem_preflop::find_matchup(canonical.key);
+
+  const auto [first_wins, second_wins] = canonical.swapped
+                                             ? std::pair{row.second_wins, row.first_wins}
+                                             : std::pair{row.first_wins, row.second_wins};
+  const std::uint64_t fact = factorial(2);
+  const std::uint64_t ties = holdem_preflop::BOARD_COUNT - first_wins - second_wins;
+
+  return {{fact * first_wins, fact * second_wins},
+          {fact * ties, fact * ties},
+          {ties * (fact / 2), ties * (fact / 2)},
+          fact * holdem_preflop::BOARD_COUNT};
+}
+
+std::vector<EquityResult> results_of(const RunoutCounts& counts) {
+  const double denom = static_cast<double>(counts.total);
 
   std::vector<EquityResult> result;
-  result.reserve(n);
-  for (std::size_t i = 0; i < n; ++i) {
-    result.push_back({static_cast<double>(win_counts[i]) / denom,
-                      static_cast<double>(tie_counts[i]) / denom,
-                      static_cast<double>(win_counts[i] + chop_equity[i]) / denom});
+  result.reserve(counts.win.size());
+  for (std::size_t i = 0; i < counts.win.size(); ++i) {
+    result.push_back({static_cast<double>(counts.win[i]) / denom,
+                      static_cast<double>(counts.tie[i]) / denom,
+                      static_cast<double>(counts.win[i] + counts.chop_equity[i]) / denom});
   }
 
   return result;
 }
 
-std::vector<EquityResult> exact_equity_detailed_from_string(
-    const std::vector<std::string>& hands_string, const std::string& board_string = "",
-    const std::string& dead_cards_string = "") {
+}  // namespace
+
+std::vector<card_t> cards_from_string(std::string_view cards) {
+  if (cards.size() % 2 != 0) [[unlikely]] {
+    throw std::invalid_argument("cards_from_string: The card string must be of even length");
+  }
+
+  std::vector<card_t> result;
+  result.reserve(cards.size() / 2);
+
+  for (unsigned i = 0; i < cards.size(); i += 2) {
+    const auto rank = detail::RANK_CHARS.find(cards[i]);
+    const auto suit = detail::SUIT_CHARS.find(cards[i + 1]);
+    if (rank == std::string_view::npos || suit == std::string_view::npos) [[unlikely]] {
+      throw std::invalid_argument("cards_from_string: The card string contains invalid characters");
+    }
+    result.push_back(detail::make_card(rank, suit));
+  }
+
+  return result;
+}
+
+std::vector<std::vector<card_t>> hands_from_strings(const std::vector<std::string>& hands_string) {
   std::vector<std::vector<card_t>> hands_cards;
   hands_cards.reserve(hands_string.size());
   for (const auto& hand_string : hands_string) {
     hands_cards.push_back(cards_from_string(hand_string));
   }
+  return hands_cards;
+}
 
-  return exact_equity_detailed(hands_cards, cards_from_string(board_string),
+std::vector<EquityResult> exact_equity_detailed(const std::vector<std::vector<card_t>>& hands_cards,
+                                                const std::vector<card_t>& board_cards = {},
+                                                const std::vector<card_t>& dead_cards = {}) {
+  const auto n = hands_cards.size();
+  if (n == 0) {
+    return {};
+  }
+
+  // A single hand takes the pot whatever the board is, but it must pass the
+  // same checks first, or the rule the README states would hold for two hands
+  // and not for one.
+  const auto used_cards = used_cards_of(hands_cards, board_cards, dead_cards);
+
+  if (n == 1) {
+    return std::vector<EquityResult>(1, {1.0, 0.0, 1.0});
+  }
+
+  return results_of(is_heads_up_holdem_preflop(hands_cards, board_cards, dead_cards)
+                        ? holdem_preflop_counts(hands_cards)
+                        : count_runouts(hands_cards, board_cards, used_cards));
+}
+
+std::vector<EquityResult> exact_equity_detailed_from_string(
+    const std::vector<std::string>& hands_string, const std::string& board_string = "",
+    const std::string& dead_cards_string = "") {
+  return exact_equity_detailed(hands_from_strings(hands_string), cards_from_string(board_string),
                                cards_from_string(dead_cards_string));
 }
 
@@ -480,13 +551,33 @@ std::vector<double> exact_equity(const std::vector<std::vector<card_t>>& hands_c
 
 std::vector<double> exact_equity_from_string(const std::vector<std::string>& hands_string,
                                              const std::string& board_string = "") {
-  std::vector<std::vector<card_t>> hands_cards;
-  hands_cards.reserve(hands_string.size());
-  for (const auto& hand_string : hands_string) {
-    hands_cards.push_back(cards_from_string(hand_string));
-  }
+  return exact_equity(hands_from_strings(hands_string), cards_from_string(board_string));
+}
 
-  return exact_equity(hands_cards, cards_from_string(board_string));
+/// @brief Enumerates a spot and returns its counters, never reading the table.
+/// @details The table generator and the tests need the enumeration's own
+/// counters for the spots the table answers.
+RunoutCounts count_runouts_from_string(const std::vector<std::string>& hands_string,
+                                       const std::string& board_string,
+                                       const std::string& dead_cards_string) {
+  const auto hands_cards = hands_from_strings(hands_string);
+  const auto board_cards = cards_from_string(board_string);
+  if (hands_cards.size() < 2) [[unlikely]] {
+    throw std::invalid_argument("count_runouts: An enumeration needs at least 2 hands");
+  }
+  const auto used_cards =
+      used_cards_of(hands_cards, board_cards, cards_from_string(dead_cards_string));
+  return count_runouts(hands_cards, board_cards, used_cards);
+}
+
+std::pair<std::uint32_t, bool> holdem_preflop_key(const std::vector<card_t>& first,
+                                                  const std::vector<card_t>& second) {
+  if (first.size() != HOLDEM_HAND_SIZE || second.size() != HOLDEM_HAND_SIZE) [[unlikely]] {
+    throw std::invalid_argument("holdem_preflop_key: Each hand must contain exactly 2 cards");
+  }
+  const auto canonical =
+      holdem_preflop::canonical_matchup({first[0], first[1]}, {second[0], second[1]});
+  return {canonical.key, canonical.swapped};
 }
 
 }  // namespace gtow
@@ -526,4 +617,19 @@ PYBIND11_MODULE(_core, m) {
         py::arg("hands"), py::arg("board") = "", py::arg("dead_cards") = "",
         py::call_guard<py::gil_scoped_release>(),
         "Calculates the exact win, tie and equity of each hand from a string representation");
+
+  // Private. The table generator and the tests compare the preflop table with
+  // the enumeration, so they need the enumeration's own counters and the key
+  // the table files a matchup under.
+  py::class_<gtow::RunoutCounts>(m, "_RunoutCounts")
+      .def_readonly("win", &gtow::RunoutCounts::win)
+      .def_readonly("tie", &gtow::RunoutCounts::tie)
+      .def_readonly("chop_equity", &gtow::RunoutCounts::chop_equity)
+      .def_readonly("total", &gtow::RunoutCounts::total);
+  m.def("_count_runouts_from_string", &gtow::count_runouts_from_string, py::arg("hands"),
+        py::arg("board") = "", py::arg("dead_cards") = "",
+        py::call_guard<py::gil_scoped_release>(),
+        "Enumerates a spot and returns its runout counters, never reading the preflop table");
+  m.def("_holdem_preflop_key", &gtow::holdem_preflop_key, py::arg("first"), py::arg("second"),
+        "Returns the preflop table key of a matchup and whether the table stores it swapped");
 }

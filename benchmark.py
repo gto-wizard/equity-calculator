@@ -6,6 +6,10 @@ work both grow there, and a preflop Omaha call costs tens of times a preflop
 Hold'em call. Every spot from the flop on is cheaper than preflop Hold'em.
 Read the table rather than assuming a limit.
 
+Heads-up Hold'em preflop does not enumerate: it reads a precomputed table, so
+its row shows `table` instead of an evaluation count. Three-handed Hold'em preflop shows
+what the enumeration costs.
+
 The table also reports the number of five-card evaluations each spot needs, and
 the rate that implies. A caller can estimate any other spot from the rate:
 
@@ -32,12 +36,14 @@ HOLDEM_HAND_SIZE = 2
 #: The number of ways to choose three of the five board cards.
 BOARD_TRIPLES = 10
 
-#: (label, hands, board, how many times to repeat the call)
+#: (label, hands, board, how many times to repeat the call, whether the
+#: preflop table answers it)
 CELLS = [
-    ("NLHE 2-way preflop", ["Ah5h", "KsQc"], "", 5),
-    ("PLO4 2-way preflop", ["Ah5h7s7d", "QcJcJh2d"], "", 3),
-    ("PLO6 2-way preflop", ["Ah5h7s7dTc9s", "Ks3d2sQs5dJs"], "", 3),
-    ("PLO6 3-way flop", ["Ah5h7s7dTc9s", "Ks3d2sQs5dJs", "2c4c6d8dTdJd"], "QhAs3c", 5),
+    ("NLHE 2-way preflop", ["Ah5h", "KsQc"], "", 5, True),
+    ("NLHE 3-way preflop", ["Ah5h", "KsQc", "9d9c"], "", 5, False),
+    ("PLO4 2-way preflop", ["Ah5h7s7d", "QcJcJh2d"], "", 3, False),
+    ("PLO6 2-way preflop", ["Ah5h7s7dTc9s", "Ks3d2sQs5dJs"], "", 3, False),
+    ("PLO6 3-way flop", ["Ah5h7s7dTc9s", "Ks3d2sQs5dJs", "2c4c6d8dTdJd"], "QhAs3c", 5, False),
 ]
 
 
@@ -69,12 +75,15 @@ def main() -> None:
     print()
     print("| Spot | Best of N | Evaluations | Rate |")
     print("| --- | --- | --- | --- |")
-    for label, hands, board, repeats in CELLS:
+    for label, hands, board, repeats, from_table in CELLS:
         fastest = measure(hands, board, repeats)
+        if from_table:
+            print(f"| {label} | {fastest * 1000:.3f} ms (N={repeats}) | table | - |")
+            continue
         evaluations = evaluation_count(hands, board)
         rate = evaluations / fastest / 1e6
         print(
-            f"| {label} | {fastest * 1000:.1f} ms (N={repeats}) "
+            f"| {label} | {fastest * 1000:.3f} ms (N={repeats}) "
             f"| {evaluations:,} | {rate:.0f} M/s |"
         )
 

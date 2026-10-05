@@ -73,6 +73,13 @@ An input that breaks a rule raises `ValueError`.
 
 ## Cost
 
+Heads-up Hold'em preflop, with no dead cards, reads a precomputed table and
+takes microseconds. The table holds the exact result of every matchup, one
+row per class of suit relabeling (47,008 rows), so it returns what the
+enumeration returns, bit for bit. Every other spot enumerates.
+`tools/generate_holdem_preflop_table.py` writes the table from the
+enumeration and explains when to run it.
+
 Preflop Omaha is the expensive case, and heads-up is its worst case: more
 players take cards out of the deck faster than they add work per board. Every
 spot from the flop on costs less than a preflop Hold'em call. Run
